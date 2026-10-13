@@ -1,0 +1,279 @@
+{
+  "name": "Slack Notification Dispatcher",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -48,
+        -128
+      ],
+      "id": "d19e52c9-3f50-4b67-85c2-eb8b57d05686",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM access.claim_next_notification($1);",
+        "options": {
+          "queryBatching": "single",
+          "queryReplacement": "={{ [String($execution.id)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        160,
+        0
+      ],
+      "id": "eb58b528-b3cb-446d-960d-ce4ee75f3c6f",
+      "name": "Claim Next Notification",
+      "credentials": {
+        "postgres": {
+          "id": "pJ0OOYacZadGfP1X",
+          "name": "Access Request App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $input.first().json;\nconst payload = job.payload;\n\nconst config = {\n  workspaceId: \"__SLACK_WORKSPACE_ID__\",\n  sourceChannelId: \"__SLACK_REQUESTS_CHANNEL_ID__\",\n  approvalChannelId: \"__SLACK_APPROVALS_CHANNEL_ID__\",\n  reviewChannelId: \"__SLACK_REVIEW_CHANNEL_ID__\"\n};\n\nif (\n  job.status !== \"processing\" ||\n  !job.lease_token ||\n  !(Date.parse(job.leased_until) > Date.now())\n) {\n  throw new Error(\"Notification lease is missing or expired\");\n}\n\nif (\n  !payload ||\n  payload.workspace_id !== config.workspaceId ||\n  payload.channel_id !== config.sourceChannelId ||\n  String(payload.message_id) !== String(job.message_id)\n) {\n  throw new Error(\"Notification source is not allowed\");\n}\n\nif (\n  !/^[UW][A-Z0-9]+$/.test(payload.author_id || \"\") ||\n  !/^\\d+$/.test(String(job.message_id))\n) {\n  throw new Error(\"Invalid notification identity\");\n}\n\nconst requests = payload.requests;\n\nif (\n  !Array.isArray(requests) ||\n  requests.some(r => !r || typeof r !== \"object\" || Array.isArray(r))\n) {\n  throw new Error(\"Invalid notification requests\");\n}\n\nfunction value(input) {\n  if (input === null || input === undefined || input === \"\") {\n    return \"Not specified\";\n  }\n\n  return String(input)\n    .replace(/[\\u0000-\\u001F\\u007F]/g, \" \")\n    .trim();\n}\n\nfunction field(label, input) {\n  const text = `${label}: ${value(input)}`;\n\n  return {\n    type: \"plain_text\",\n    text: text.length > 1800\n      ? `${text.slice(0, 1750)}… [truncated]`\n      : text,\n    emoji: false\n  };\n}\n\nconst resourceNames = {\n  postgres: \"PostgreSQL\",\n  grafana: \"Grafana\"\n};\n\nconst permissionNames = {\n  viewer: \"Viewer\",\n  read_only: \"Read only\",\n  write: \"Write\",\n  admin: \"Administrator\",\n  root: \"Root\",\n  owner: \"Owner\"\n};\n\nconst environmentNames = {\n  development: \"Development\",\n  staging: \"Staging\",\n  production: \"Production\"\n};\n\nconst riskNames = {\n  production_mentioned: \"Production mentioned in the message\",\n  production_access: \"Production access\",\n  privileged_permissions_mentioned: \"Privileged permissions mentioned\",\n  elevated_permissions: \"Elevated permissions\",\n  environment_not_allowed: \"Outside the standard approval policy\",\n  permission_not_allowed: \"Outside the standard approval policy\",\n  instruction_attempt: \"Attempt to override extraction instructions\",\n  sensitive_data_detected: \"Sensitive data detected\",\n  unknown_resource: \"Resource is outside the supported catalog\",\n  duration_exceeds_7_days: \"Access duration exceeds seven days\",\n  beneficiary_requires_verification: \"Beneficiary identity requires verification\",\n  message_too_long: \"Message exceeds the processing limit\",\n  thread_context_truncated: \"Thread history is incomplete\",\n  multiple_pending_requests: \"Multiple pending requests in the thread\",\n  invalid_thread_target: \"Thread update target could not be verified\",\n  conflicting_thread_update: \"Reply conflicts with existing request details\",\n  inconsistent_llm_output: \"Extraction result is inconsistent\",\n  empty_access_request: \"Extraction returned no request details\",\n  llm_processing_failed: \"Automatic extraction failed\"\n};\n\nconst titles = {\n  clarification: \"💬 More details needed\",\n  standard_approval: \"📝 Access approval required\",\n  manual_review: \"⚠️ DevOps review required\"\n};\n\nconst title = titles[job.kind];\n\nif (!title) {\n  throw new Error(\"Unknown notification kind\");\n}\n\nlet channel;\nlet threadTs;\n\nif (job.kind === \"clarification\") {\n  if (\n    typeof payload.clarification_question !== \"string\" ||\n    !payload.clarification_question.trim() ||\n    !requests.some(r => r.complete === false)\n  ) {\n    throw new Error(\"Clarification details are missing\");\n  }\n\n  if (!/^\\d+\\.\\d{6}$/.test(payload.thread_ts || \"\")) {\n    throw new Error(\"Invalid source thread timestamp\");\n  }\n\n  channel = config.sourceChannelId;\n  threadTs = payload.thread_ts;\n\n} else if (job.kind === \"standard_approval\") {\n  const valid = requests.length > 0 && requests.every(r =>\n    r.route === \"standard_approval\" &&\n    r.complete === true &&\n    Array.isArray(r.risk_flags) &&\n    r.risk_flags.length === 0 &&\n    Array.isArray(r.missing_fields) &&\n    r.missing_fields.length === 0\n  );\n\n  if (!valid) {\n    throw new Error(\"Invalid approval requests\");\n  }\n\n  channel = config.approvalChannelId;\n\n} else {\n  channel = config.reviewChannelId;\n}\n\nconst blocks = [{\n  type: \"header\",\n  text: {\n    type: \"plain_text\",\n    text: title,\n    emoji: true\n  }\n}];\n\nconst fallbackParts = [\n  title,\n  `Requested by: ${payload.author_id}`,\n  `Reference: message ${job.message_id}`\n];\n\n// Only the verified event author becomes an active Slack mention.\nblocks.push({\n  type: \"context\",\n  elements: [{\n    type: \"mrkdwn\",\n    text: `Requested by <@${payload.author_id}> · Message #${job.message_id}`\n  }]\n});\n\nfunction addLabel(label) {\n  blocks.push({\n    type: \"section\",\n    text: {\n      type: \"mrkdwn\",\n      text: `*${label}*`\n    }\n  });\n\n  fallbackParts.push(label);\n}\n\n// User-controlled content stays in plain-text blocks.\nfunction addPlainText(text) {\n  const content = String(text).trim() || \"Not specified\";\n  const characters = Array.from(content);\n\n  fallbackParts.push(content);\n\n  for (let offset = 0; offset < characters.length; offset += 1300) {\n    blocks.push({\n      type: \"section\",\n      text: {\n        type: \"plain_text\",\n        text: characters.slice(offset, offset + 1300).join(\"\"),\n        emoji: false\n      }\n    });\n  }\n}\n\nif (job.kind === \"clarification\") {\n  addPlainText(payload.clarification_question);\n\n} else {\n  if (job.kind === \"manual_review\") {\n    const flags = new Set([\n      ...(payload.message_risk_flags || []),\n      ...(payload.message_validation_flags || []),\n      ...requests.flatMap(r => r.risk_flags || [])\n    ]);\n\n    // Avoid repeating source hints when extraction confirms the risk.\n    if (flags.has(\"production_access\")) {\n      flags.delete(\"production_mentioned\");\n    }\n\n    if (flags.has(\"elevated_permissions\")) {\n      flags.delete(\"privileged_permissions_mentioned\");\n    }\n\n    const reasons = [...new Set(\n      [...flags].map(flag =>\n        riskNames[flag] || \"Additional policy verification required\"\n      )\n    )];\n\n    if (reasons.length === 0) {\n      reasons.push(\n        payload.processing_status === \"failed\"\n          ? \"Automatic processing failed\"\n          : \"Request requires human interpretation\"\n      );\n    }\n\n    blocks.push({\n      type: \"section\",\n      text: {\n        type: \"mrkdwn\",\n        text: \"*Review reasons*\\n\" +\n          reasons.map(reason => `• ${reason}`).join(\"\\n\")\n      }\n    });\n\n    fallbackParts.push(\n      \"Review reasons\",\n      ...reasons\n    );\n  }\n\n  requests.forEach((request, index) => {\n    blocks.push({ type: \"divider\" });\n\n    if (requests.length > 1) {\n      addLabel(`Request ${index + 1}`);\n    }\n\n    const fields = [\n      field(\n        \"Resource\",\n        resourceNames[request.resource] || request.resource\n      ),\n      field(\n        \"Environment\",\n        environmentNames[request.environment] || request.environment\n      ),\n      field(\n        \"Permission\",\n        permissionNames[request.permission] || request.permission\n      ),\n      field(\n        \"Duration\",\n        request.duration_hours === null ||\n        request.duration_hours === undefined\n          ? null\n          : `${request.duration_hours} hours`\n      ),\n      field(\n        \"Beneficiary\",\n        request.subject === \"self\"\n          ? \"Same as requester\"\n          : request.subject\n      )\n    ];\n\n    blocks.push({\n      type: \"section\",\n      fields\n    });\n\n    fallbackParts.push(...fields.map(f => f.text));\n\n    addLabel(\"Business reason\");\n    addPlainText(request.reason || \"Not specified\");\n\n    if (request.complete === false) {\n      addLabel(\"Missing details\");\n      addPlainText(\n        (request.missing_fields || [])\n          .map(name => name.replace(/_/g, \" \"))\n          .join(\", \")\n      );\n    }\n  });\n\n  if (job.kind === \"manual_review\" && payload.sanitized_text) {\n    blocks.push({ type: \"divider\" });\n    addLabel(\"Source message\");\n    addPlainText(payload.sanitized_text);\n  }\n}\n\nconst fallbackText = fallbackParts.join(\"\\n\")\n  .replace(/&/g, \"&amp;\")\n  .replace(/</g, \"&lt;\")\n  .replace(/>/g, \"&gt;\");\n\nif (blocks.length > 50 || fallbackText.length > 35000) {\n  throw new Error(\"Notification exceeds the supported message size\");\n}\n\nconst slackBody = {\n  channel,\n  text: fallbackText,\n  blocks,\n  mrkdwn: false,\n  parse: \"none\",\n  link_names: false,\n  unfurl_links: false,\n  unfurl_media: false\n};\n\nif (threadTs) {\n  slackBody.thread_ts = threadTs;\n  slackBody.reply_broadcast = false;\n}\n\nreturn [{\n  json: {\n    ...job,\n    slack_body: slackBody\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        0
+      ],
+      "id": "603c765c-594e-4b78-8cf8-f25fc3dd1aab",
+      "name": "Prepare Slack Notification",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst job = $('Prepare Slack Notification').first().json;\nconst body = response.body;\n\nif (\n  Number(response.statusCode) !== 200 ||\n  !body ||\n  body.ok !== true\n) {\n  const errorCode =\n    typeof body?.error === \"string\" &&\n    /^[a-z0-9_]{1,80}$/.test(body.error)\n      ? body.error\n      : \"invalid_response\";\n\n  throw new Error(`Slack delivery failed: ${errorCode}`);\n}\n\nif (body.channel !== job.slack_body.channel) {\n  throw new Error(\"Slack response channel does not match destination\");\n}\n\nif (\n  typeof body.ts !== \"string\" ||\n  !/^\\d+\\.\\d{6}$/.test(body.ts)\n) {\n  throw new Error(\"Slack response message timestamp is missing\");\n}\n\nreturn [{\n  json: {\n    notification_id: job.id,\n    lease_token: job.lease_token,\n    slack_message_ts: body.ts\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -112
+      ],
+      "id": "8b00ee50-fe6c-4ed7-b9c4-605e22dbf24a",
+      "name": "Check Slack Response",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE access.notification_outbox AS n\nSET\n  status = 'sent',\n  slack_message_ts = $3,\n  lease_token = NULL,\n  leased_until = NULL,\n  processing_execution_id = NULL,\n  last_error_code = NULL,\n  updated_at = NOW()\nWHERE n.id = $1::uuid\n  AND n.lease_token = $2::uuid\n  AND n.processing_execution_id = $4\n  AND n.status = 'processing'\n  AND n.leased_until > NOW()\nRETURNING\n  n.id AS notification_id,\n  n.message_id,\n  n.kind,\n  n.status,\n  n.attempts,\n  n.slack_message_ts;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.notification_id,\n  $json.lease_token,\n  $json.slack_message_ts,\n  String($execution.id)\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1136,
+        -224
+      ],
+      "id": "8a38546e-4591-4f66-8ff2-904e3808421a",
+      "name": "Mark Notification Sent",
+      "retryOnFail": true,
+      "credentials": {
+        "postgres": {
+          "id": "pJ0OOYacZadGfP1X",
+          "name": "Access Request App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE access.notification_outbox AS n\nSET\n  status = CASE\n    WHEN n.attempts >= 3 THEN 'failed'\n    ELSE 'pending'\n  END,\n  available_at = NOW()\n    + INTERVAL '30 seconds' * n.attempts,\n  lease_token = NULL,\n  leased_until = NULL,\n  processing_execution_id = NULL,\n  last_error_code = 'slack_delivery_failed',\n  updated_at = NOW()\nWHERE n.status = 'processing'\n  AND n.processing_execution_id = $1\n  AND n.leased_until > NOW()\nRETURNING\n  n.id AS notification_id,\n  n.message_id,\n  n.kind,\n  n.status,\n  n.attempts,\n  n.available_at,\n  n.last_error_code;",
+        "options": {
+          "queryReplacement": "={{ [String($execution.id)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        976,
+        112
+      ],
+      "id": "b2c2b4db-b18e-4f9e-88b7-3b0de3401e0b",
+      "name": "Handle Notification Failure",
+      "credentials": {
+        "postgres": {
+          "id": "pJ0OOYacZadGfP1X",
+          "name": "Access Request App DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "slackApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.slack_body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        608,
+        -112
+      ],
+      "id": "ef36e823-5c13-4402-a677-b741190e02ba",
+      "name": "Send Slack Notification",
+      "credentials": {
+        "slackApi": {
+          "id": "Zw6fpAL2pNjjsb1C",
+          "name": "Slack account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 15
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -48,
+        112
+      ],
+      "id": "c3809964-02be-454d-bece-b201cd2643c1",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Claim Next Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Next Notification": {
+      "main": [
+        [
+          {
+            "node": "Prepare Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Slack Notification": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Notification Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Slack Response": {
+      "main": [
+        [
+          {
+            "node": "Mark Notification Sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Notification Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Slack Notification": {
+      "main": [
+        [
+          {
+            "node": "Check Slack Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Notification Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Claim Next Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "eaf07acf-b25b-4186-bd76-23d61a1f4255",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "28774817f9310a0a58efc2824d4ea4f15df66d7ed0500bd3df4f509401156af9"
+  },
+  "nodeGroups": [],
+  "id": "rVCZnyJw0hxErstL",
+  "tags": []
+}

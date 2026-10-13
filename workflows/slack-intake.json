@@ -1,0 +1,113 @@
+{
+  "name": "Slack Access Request Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "trigger": [
+          "message"
+        ],
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "__SLACK_REQUESTS_CHANNEL_ID__"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [
+        -128,
+        48
+      ],
+      "id": "23462fca-cc8d-4aa0-944e-8418f5f74d33",
+      "name": "Slack Trigger",
+      "webhookId": "56791876-12fc-453e-b0db-5e12005ac242",
+      "credentials": {
+        "slackApi": {
+          "id": "Zw6fpAL2pNjjsb1C",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $input.first().json;\n\nconst workspaceId = \"__SLACK_WORKSPACE_ID__\";\nconst channelId = \"__SLACK_REQUESTS_CHANNEL_ID__\";\n\nif (\n  event.type !== \"message\" ||\n  event.channel !== channelId ||\n  (event.team && event.team !== workspaceId)\n) {\n  return [];\n}\n\nif (\n  event.bot_id ||\n  event.bot_profile ||\n  event.hidden ||\n  (\n    event.subtype &&\n    ![\"thread_broadcast\", \"file_share\"].includes(event.subtype)\n  )\n) {\n  return [];\n}\n\nif (\n  typeof event.user !== \"string\" ||\n  typeof event.text !== \"string\" ||\n  event.text.trim() === \"\"\n) {\n  return [];\n}\n\nconst messageTs = event.ts;\nconst threadTs = event.thread_ts || messageTs;\nconst timestampPattern = /^\\d+\\.\\d{6}$/;\n\nif (\n  typeof messageTs !== \"string\" ||\n  typeof threadTs !== \"string\" ||\n  !timestampPattern.test(messageTs) ||\n  !timestampPattern.test(threadTs)\n) {\n  return [];\n}\n\nlet text = event.text;\nconst flags = new Set();\n\nconst secretPatterns = [\n  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\\s\\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$)/g,\n  /\\bxox[baprs]-[A-Za-z0-9-]{12,}/g,\n  /\\bxapp-[A-Za-z0-9-]{12,}/g,\n  /\\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}/g,\n  /\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b/g,\n  /\\bBearer\\s+[A-Za-z0-9._~+\\/=-]{12,}/gi,\n  /\\b(?:postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis|rediss|amqps?):\\/\\/[^\\s/]+:[^\\s@]+@[^\\s<>\"']+/gi,\n  /\\b(?:password|passwd|api[_-]?key|token|secret)\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|[^\\s,;]+)/gi\n];\n\nfor (const pattern of secretPatterns) {\n  text = text.replace(pattern, () => {\n    flags.add(\"sensitive_data_detected\");\n    return \"[REDACTED_SECRET]\";\n  });\n}\n\nif (/\\b(?:production|prod)\\b/i.test(text)) {\n  flags.add(\"production_mentioned\");\n}\n\nif (/\\b(?:admin|root|owner|superuser|sudo)\\b/i.test(text)) {\n  flags.add(\"privileged_permissions_mentioned\");\n}\n\nif (\n  /ignore.{0,40}(?:instructions|rules)|system\\s*prompt|approved\\s*[:=]|route\\s*[:=]/i.test(text)\n) {\n  flags.add(\"instruction_attempt\");\n}\n\nif (text.length > 12000) {\n  flags.add(\"message_too_long\");\n  text = text.slice(0, 12000);\n}\n\nreturn [{\n  json: {\n    text,\n    security_flags: [...flags],\n    source: \"slack\",\n    workspace_id: workspaceId,\n    channel_id: channelId,\n    author_id: event.user,\n    message_ts: messageTs,\n    thread_ts: threadTs,\n    event_id: `slack:${workspaceId}:${channelId}:${messageTs}`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        48
+      ],
+      "id": "f419c545-8d1f-4671-b40c-18c13ccb47b0",
+      "name": "Prepare Slack Message"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH input AS (\n  SELECT $1::jsonb AS event\n)\nINSERT INTO access.messages (\n  event_id,\n  source,\n  workspace_id,\n  channel_id,\n  author_id,\n  message_ts,\n  thread_ts,\n  sanitized_text,\n  security_flags,\n  status\n)\nSELECT\n  event->>'event_id',\n  event->>'source',\n  event->>'workspace_id',\n  event->>'channel_id',\n  event->>'author_id',\n  event->>'message_ts',\n  event->>'thread_ts',\n  event->>'text',\n  event->'security_flags',\n  'pending'\nFROM input\nON CONFLICT (event_id) DO NOTHING\nRETURNING id AS message_id, event_id, status;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        48
+      ],
+      "id": "341cf7b8-3109-4d5a-bafe-3af20bf0916f",
+      "name": "Enqueue Message",
+      "credentials": {
+        "postgres": {
+          "id": "pJ0OOYacZadGfP1X",
+          "name": "Access Request App DB"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Slack Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Enqueue Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "fea30607-0168-4a45-96d1-805bfd77ed34",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "28774817f9310a0a58efc2824d4ea4f15df66d7ed0500bd3df4f509401156af9"
+  },
+  "nodeGroups": [],
+  "id": "zEKsShQVc7PdKVkd",
+  "tags": []
+}

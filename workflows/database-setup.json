@@ -1,0 +1,278 @@
+{
+    "name":  "Database Setup",
+    "nodes":  [
+                  {
+                      "parameters":  {
+
+                                     },
+                      "type":  "n8n-nodes-base.manualTrigger",
+                      "typeVersion":  1,
+                      "position":  [
+                                       0,
+                                       0
+                                   ],
+                      "id":  "373d58f6-3b42-4109-8eac-108fa8192f5e",
+                      "name":  "When clicking вЂExecute workflowвЂ™"
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "CREATE SCHEMA IF NOT EXISTS access;\n\nCREATE TABLE IF NOT EXISTS access.messages (\n  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n  event_id TEXT NOT NULL UNIQUE,\n  source TEXT NOT NULL DEFAULT \u0027demo\u0027\n    CHECK (source IN (\u0027demo\u0027, \u0027slack\u0027)),\n  workspace_id TEXT NOT NULL,\n  channel_id TEXT NOT NULL,\n  author_id TEXT NOT NULL,\n  message_ts TEXT NOT NULL,\n  thread_ts TEXT NOT NULL,\n  sanitized_text TEXT NOT NULL,\n  security_flags JSONB NOT NULL DEFAULT \u0027[]\u0027::jsonb\n    CHECK (jsonb_typeof(security_flags) = \u0027array\u0027),\n  message_type TEXT\n    CHECK (\n      message_type IN (\n        \u0027access_request\u0027,\n        \u0027non_request\u0027,\n        \u0027ambiguous\u0027,\n        \u0027clarification\u0027\n      )\n    ),\n  llm_message_type TEXT,\n  status TEXT NOT NULL DEFAULT \u0027pending\u0027\n    CHECK (\n      status IN (\u0027pending\u0027, \u0027processing\u0027, \u0027processed\u0027, \u0027failed\u0027)\n    ),\n  clarification_question TEXT,\n  result JSONB,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nCREATE TABLE IF NOT EXISTS access.requests (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  message_id BIGINT NOT NULL\n    REFERENCES access.messages(id),\n  request_index INTEGER NOT NULL\n    CHECK (request_index \u003e= 0),\n  subject TEXT,\n  resource TEXT,\n  environment TEXT,\n  permission TEXT,\n  duration_hours INTEGER\n    CHECK (duration_hours \u003e 0),\n  reason TEXT,\n  complete BOOLEAN NOT NULL,\n  missing_fields JSONB NOT NULL DEFAULT \u0027[]\u0027::jsonb\n    CHECK (jsonb_typeof(missing_fields) = \u0027array\u0027),\n  risk_flags JSONB NOT NULL DEFAULT \u0027[]\u0027::jsonb\n    CHECK (jsonb_typeof(risk_flags) = \u0027array\u0027),\n  route TEXT NOT NULL\n    CHECK (\n      route IN (\n        \u0027standard_approval\u0027,\n        \u0027needs_clarification\u0027,\n        \u0027manual_review\u0027\n      )\n    ),\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  UNIQUE (message_id, request_index),\n  CHECK (\n    route \u003c\u003e \u0027standard_approval\u0027\n    OR (\n      complete = TRUE\n      AND jsonb_array_length(missing_fields) = 0\n      AND jsonb_array_length(risk_flags) = 0\n    )\n  )\n);\n\nCREATE INDEX IF NOT EXISTS messages_thread_idx\n  ON access.messages (\n    workspace_id,\n    channel_id,\n    thread_ts\n  );\n\nCREATE INDEX IF NOT EXISTS messages_pending_idx\n  ON access.messages (created_at)\n  WHERE status = \u0027pending\u0027;\n\nSELECT \u0027Database tables are ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       224,
+                                       0
+                                   ],
+                      "id":  "413848ef-4229-4b27-b980-4ecd6cd6e1fc",
+                      "name":  "Execute a SQL query",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "DO $$\nBEGIN\n  IF NOT EXISTS (\n    SELECT 1 FROM pg_roles\n    WHERE rolname = \u0027access_worker\u0027\n  ) THEN\n    CREATE ROLE access_worker\n      LOGIN\n      NOSUPERUSER\n      NOCREATEDB\n      NOCREATEROLE\n      NOREPLICATION;\n  END IF;\nEND\n$$;\n\nREVOKE ALL ON SCHEMA access FROM PUBLIC;\n\nGRANT CONNECT ON DATABASE access_requests\n  TO access_worker;\n\nGRANT USAGE ON SCHEMA access\n  TO access_worker;\n\nGRANT SELECT, INSERT, UPDATE\n  ON ALL TABLES IN SCHEMA access\n  TO access_worker;\n\nGRANT USAGE, SELECT\n  ON ALL SEQUENCES IN SCHEMA access\n  TO access_worker;\n\nALTER DEFAULT PRIVILEGES IN SCHEMA access\n  GRANT SELECT, INSERT, UPDATE ON TABLES\n  TO access_worker;\n\nALTER DEFAULT PRIVILEGES IN SCHEMA access\n  GRANT USAGE, SELECT ON SEQUENCES\n  TO access_worker;\n\nSELECT \u0027Application database user is ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       448,
+                                       0
+                                   ],
+                      "id":  "f1d50cad-2ca0-448e-b276-957dda770533",
+                      "name":  "Configure App User",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "ALTER TABLE access.messages\n  ADD COLUMN IF NOT EXISTS attempts INTEGER\n    NOT NULL DEFAULT 0 CHECK (attempts \u003e= 0),\n\n  ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ\n    NOT NULL DEFAULT NOW(),\n\n  ADD COLUMN IF NOT EXISTS lease_token UUID,\n\n  ADD COLUMN IF NOT EXISTS leased_until TIMESTAMPTZ,\n\n  ADD COLUMN IF NOT EXISTS processing_execution_id TEXT,\n\n  ADD COLUMN IF NOT EXISTS error_code TEXT;\n\nCREATE INDEX IF NOT EXISTS messages_queue_idx\n  ON access.messages (available_at, created_at, id)\n  WHERE status = \u0027pending\u0027;\n\nSELECT \u0027Queue storage is ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       672,
+                                       0
+                                   ],
+                      "id":  "4f5961f9-36fd-4c91-938d-a45bb4d4add1",
+                      "name":  "Prepare Queue",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "CREATE OR REPLACE FUNCTION access.claim_next_message(\n  p_execution_id TEXT\n)\nRETURNS SETOF access.messages\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  IF p_execution_id IS NULL\n     OR trim(p_execution_id) = \u0027\u0027 THEN\n    RAISE EXCEPTION \u0027Execution ID is required\u0027;\n  END IF;\n\n  PERFORM pg_advisory_xact_lock(90426001);\n\n  UPDATE access.messages\n  SET\n    status = CASE\n      WHEN attempts \u003e= 3 THEN \u0027failed\u0027\n      ELSE \u0027pending\u0027\n    END,\n    error_code = \u0027processing_lease_expired\u0027,\n    available_at = NOW(),\n    lease_token = NULL,\n    leased_until = NULL,\n    processing_execution_id = NULL,\n    updated_at = NOW()\n  WHERE status = \u0027processing\u0027\n    AND leased_until \u003c= NOW();\n\n  RETURN QUERY\n  WITH candidate AS (\n    SELECT m.id\n    FROM access.messages m\n    WHERE m.status = \u0027pending\u0027\n      AND m.available_at \u003c= NOW()\n      AND m.attempts \u003c 3\n      AND NOT EXISTS (\n        SELECT 1\n        FROM access.messages earlier\n        WHERE earlier.workspace_id = m.workspace_id\n          AND earlier.channel_id = m.channel_id\n          AND earlier.thread_ts = m.thread_ts\n          AND earlier.id \u003c m.id\n          AND earlier.status IN (\u0027pending\u0027, \u0027processing\u0027)\n      )\n    ORDER BY m.created_at, m.id\n    LIMIT 1\n    FOR UPDATE OF m SKIP LOCKED\n  )\n  UPDATE access.messages m\n  SET\n    status = \u0027processing\u0027,\n    attempts = m.attempts + 1,\n    lease_token = gen_random_uuid(),\n    leased_until = NOW() + INTERVAL \u00275 minutes\u0027,\n    processing_execution_id = p_execution_id,\n    updated_at = NOW()\n  FROM candidate c\n  WHERE m.id = c.id\n  RETURNING m.*;\nEND;\n$$;\n\nREVOKE ALL\n  ON FUNCTION access.claim_next_message(TEXT)\n  FROM PUBLIC;\n\nGRANT EXECUTE\n  ON FUNCTION access.claim_next_message(TEXT)\n  TO access_worker;\n\nSELECT \u0027Queue claim function is ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       896,
+                                       0
+                                   ],
+                      "id":  "152316ae-915a-4407-a5d2-6b4b99115bb9",
+                      "name":  "Create Queue Claim Function",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "CREATE TABLE IF NOT EXISTS access.notification_outbox (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n\n  message_id BIGINT NOT NULL\n    REFERENCES access.messages(id),\n\n  kind TEXT NOT NULL CHECK (\n    kind IN (\n      \u0027clarification\u0027,\n      \u0027standard_approval\u0027,\n      \u0027manual_review\u0027\n    )\n  ),\n\n  payload JSONB NOT NULL CHECK (\n    jsonb_typeof(payload) = \u0027object\u0027\n  ),\n\n  status TEXT NOT NULL DEFAULT \u0027pending\u0027 CHECK (\n    status IN (\n      \u0027pending\u0027,\n      \u0027processing\u0027,\n      \u0027sent\u0027,\n      \u0027failed\u0027,\n      \u0027cancelled\u0027\n    )\n  ),\n\n  attempts INTEGER NOT NULL DEFAULT 0 CHECK (\n    attempts \u003e= 0\n  ),\n\n  available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n\n  lease_token UUID,\n  leased_until TIMESTAMPTZ,\n  processing_execution_id TEXT,\n\n  slack_message_ts TEXT,\n  last_error_code TEXT,\n\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n\n  UNIQUE (message_id, kind),\n\n  CHECK (\n    (\n      status = \u0027processing\u0027\n      AND lease_token IS NOT NULL\n      AND leased_until IS NOT NULL\n    )\n    OR (\n      status \u003c\u003e \u0027processing\u0027\n      AND lease_token IS NULL\n      AND leased_until IS NULL\n    )\n  )\n);\n\nCREATE INDEX IF NOT EXISTS notification_outbox_pending_idx\nON access.notification_outbox (\n  available_at,\n  created_at,\n  id\n)\nWHERE status = \u0027pending\u0027;\n\nGRANT SELECT, INSERT, UPDATE\nON access.notification_outbox\nTO access_worker;\n\nSELECT \u0027Notification outbox is ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       1120,
+                                       0
+                                   ],
+                      "id":  "e983408e-6dc0-402c-a124-4e37e86fb5ba",
+                      "name":  "Create Notification Outbox",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "CREATE OR REPLACE FUNCTION access.enqueue_notifications()\nRETURNS TRIGGER\nLANGUAGE plpgsql\nAS $$\nDECLARE\n  v_result JSONB;\n  v_requests JSONB;\n  v_standard JSONB;\n  v_manual JSONB;\n  v_incomplete JSONB;\n  v_payload JSONB;\n  v_question TEXT;\nBEGIN\n  -- Only real Slack events produce notifications.\n  IF NEW.source \u003c\u003e \u0027slack\u0027 THEN\n    RETURN NEW;\n  END IF;\n\n  v_result := COALESCE(NEW.result, \u0027{}\u0027::jsonb);\n\n  v_requests := CASE\n    WHEN jsonb_typeof(v_result-\u003e\u0027requests\u0027) = \u0027array\u0027\n      THEN v_result-\u003e\u0027requests\u0027\n    ELSE \u0027[]\u0027::jsonb\n  END;\n\n  SELECT\n    COALESCE(\n      jsonb_agg(r.value) FILTER (\n        WHERE r.value-\u003e\u003e\u0027route\u0027 = \u0027standard_approval\u0027\n      ),\n      \u0027[]\u0027::jsonb\n    ),\n    COALESCE(\n      jsonb_agg(r.value) FILTER (\n        WHERE r.value-\u003e\u003e\u0027route\u0027 = \u0027manual_review\u0027\n      ),\n      \u0027[]\u0027::jsonb\n    ),\n    COALESCE(\n      jsonb_agg(r.value) FILTER (\n        WHERE r.value-\u003e\u003e\u0027complete\u0027 = \u0027false\u0027\n      ),\n      \u0027[]\u0027::jsonb\n    )\n  INTO v_standard, v_manual, v_incomplete\n  FROM jsonb_array_elements(v_requests) AS r(value);\n\n  v_question := NULLIF(\n    btrim(v_result-\u003e\u003e\u0027clarification_question\u0027),\n    \u0027\u0027\n  );\n\n  -- Delivery destinations will be selected from trusted configuration.\n  v_payload := jsonb_build_object(\n    \u0027message_id\u0027, NEW.id,\n    \u0027workspace_id\u0027, NEW.workspace_id,\n    \u0027channel_id\u0027, NEW.channel_id,\n    \u0027author_id\u0027, NEW.author_id,\n    \u0027message_ts\u0027, NEW.message_ts,\n    \u0027thread_ts\u0027, NEW.thread_ts,\n    \u0027sanitized_text\u0027, NEW.sanitized_text,\n    \u0027message_type\u0027, NEW.message_type,\n    \u0027processing_status\u0027, NEW.status,\n    \u0027error_code\u0027, NEW.error_code,\n    \u0027message_risk_flags\u0027,\n      COALESCE(\n        v_result-\u003e\u0027message_risk_flags\u0027,\n        NEW.security_flags,\n        \u0027[]\u0027::jsonb\n      ),\n    \u0027message_validation_flags\u0027,\n      COALESCE(\n        v_result-\u003e\u0027message_validation_flags\u0027,\n        \u0027[]\u0027::jsonb\n      )\n  );\n\n  IF NEW.status = \u0027processed\u0027\n     AND jsonb_array_length(v_incomplete) \u003e 0\n     AND v_question IS NOT NULL\n  THEN\n    INSERT INTO access.notification_outbox (\n      message_id, kind, payload\n    )\n    VALUES (\n      NEW.id,\n      \u0027clarification\u0027,\n      v_payload || jsonb_build_object(\n        \u0027requests\u0027, v_incomplete,\n        \u0027clarification_question\u0027, v_question\n      )\n    )\n    ON CONFLICT (message_id, kind) DO NOTHING;\n  END IF;\n\n  IF NEW.status = \u0027processed\u0027\n     AND jsonb_array_length(v_standard) \u003e 0\n  THEN\n    INSERT INTO access.notification_outbox (\n      message_id, kind, payload\n    )\n    VALUES (\n      NEW.id,\n      \u0027standard_approval\u0027,\n      v_payload || jsonb_build_object(\n        \u0027requests\u0027, v_standard\n      )\n    )\n    ON CONFLICT (message_id, kind) DO NOTHING;\n  END IF;\n\n  IF NEW.status = \u0027failed\u0027\n     OR v_result-\u003e\u003e\u0027message_route\u0027 = \u0027manual_review\u0027\n     OR jsonb_array_length(v_manual) \u003e 0\n  THEN\n    INSERT INTO access.notification_outbox (\n      message_id, kind, payload\n    )\n    VALUES (\n      NEW.id,\n      \u0027manual_review\u0027,\n      v_payload || jsonb_build_object(\n        \u0027requests\u0027, v_manual\n      )\n    )\n    ON CONFLICT (message_id, kind) DO NOTHING;\n  END IF;\n\n  RETURN NEW;\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION access.enqueue_notifications()\nFROM PUBLIC;\n\nGRANT EXECUTE ON FUNCTION access.enqueue_notifications()\nTO access_worker;\n\nCREATE OR REPLACE TRIGGER enqueue_message_notifications\nAFTER UPDATE OF status ON access.messages\nFOR EACH ROW\nWHEN (\n  OLD.status IS DISTINCT FROM NEW.status\n  AND NEW.status IN (\u0027processed\u0027, \u0027failed\u0027)\n)\nEXECUTE FUNCTION access.enqueue_notifications();\n\nSELECT \u0027Notification trigger is ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       1344,
+                                       0
+                                   ],
+                      "id":  "88b55c9c-6d28-47a9-8154-b14a804bc84d",
+                      "name":  "Create Notification Outbox1",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "CREATE OR REPLACE FUNCTION access.claim_next_notification(\n  p_execution_id TEXT\n)\nRETURNS SETOF access.notification_outbox\nLANGUAGE plpgsql\nAS $$\nDECLARE\n  v_notification_id UUID;\nBEGIN\n  IF p_execution_id IS NULL\n     OR btrim(p_execution_id) = \u0027\u0027\n  THEN\n    RAISE EXCEPTION \u0027Execution ID is required\u0027;\n  END IF;\n\n  -- Serialize the short claim transaction.\n  PERFORM pg_advisory_xact_lock(90426002);\n\n  -- Recover jobs whose processing lease has expired.\n  UPDATE access.notification_outbox AS n\n  SET\n    status = CASE\n      WHEN n.attempts \u003e= 3 THEN \u0027failed\u0027\n      ELSE \u0027pending\u0027\n    END,\n    available_at = NOW() + INTERVAL \u002715 seconds\u0027,\n    lease_token = NULL,\n    leased_until = NULL,\n    processing_execution_id = NULL,\n    last_error_code = \u0027delivery_lease_expired\u0027,\n    updated_at = NOW()\n  WHERE n.status = \u0027processing\u0027\n    AND n.leased_until \u003c= NOW();\n\n  SELECT n.id\n  INTO v_notification_id\n  FROM access.notification_outbox AS n\n  WHERE n.status = \u0027pending\u0027\n    AND n.available_at \u003c= NOW()\n    AND n.attempts \u003c 3\n  ORDER BY n.created_at, n.id\n  LIMIT 1\n  FOR UPDATE OF n SKIP LOCKED;\n\n  IF v_notification_id IS NULL THEN\n    RETURN;\n  END IF;\n\n  RETURN QUERY\n  UPDATE access.notification_outbox AS n\n  SET\n    status = \u0027processing\u0027,\n    attempts = n.attempts + 1,\n    lease_token = gen_random_uuid(),\n    leased_until = NOW() + INTERVAL \u00275 minutes\u0027,\n    processing_execution_id = p_execution_id,\n    updated_at = NOW()\n  WHERE n.id = v_notification_id\n  RETURNING n.*;\nEND;\n$$;\n\nREVOKE ALL ON FUNCTION access.claim_next_notification(TEXT)\nFROM PUBLIC;\n\nGRANT EXECUTE ON FUNCTION access.claim_next_notification(TEXT)\nTO access_worker;\n\nSELECT \u0027Notification claim function is ready\u0027 AS result;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       1568,
+                                       0
+                                   ],
+                      "id":  "d01ee67b-06ef-40cf-a27a-1c07a8e57116",
+                      "name":  "Create Notification Claim Function",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "aOaaym61jTlsasr5",
+                                                           "name":  "Postgres account"
+                                                       }
+                                      }
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "When clicking вЂExecute workflowвЂ™":  {
+                                                                     "main":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Execute a SQL query",
+                                                                                          "type":  "main",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                                 },
+                        "Execute a SQL query":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Configure App User",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "Configure App User":  {
+                                                   "main":  [
+                                                                [
+                                                                    {
+                                                                        "node":  "Prepare Queue",
+                                                                        "type":  "main",
+                                                                        "index":  0
+                                                                    }
+                                                                ]
+                                                            ]
+                                               },
+                        "Prepare Queue":  {
+                                              "main":  [
+                                                           [
+                                                               {
+                                                                   "node":  "Create Queue Claim Function",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               }
+                                                           ]
+                                                       ]
+                                          },
+                        "Create Queue Claim Function":  {
+                                                            "main":  [
+                                                                         [
+                                                                             {
+                                                                                 "node":  "Create Notification Outbox",
+                                                                                 "type":  "main",
+                                                                                 "index":  0
+                                                                             }
+                                                                         ]
+                                                                     ]
+                                                        },
+                        "Create Notification Outbox":  {
+                                                           "main":  [
+                                                                        [
+                                                                            {
+                                                                                "node":  "Create Notification Outbox1",
+                                                                                "type":  "main",
+                                                                                "index":  0
+                                                                            }
+                                                                        ]
+                                                                    ]
+                                                       },
+                        "Create Notification Outbox1":  {
+                                                            "main":  [
+                                                                         [
+                                                                             {
+                                                                                 "node":  "Create Notification Claim Function",
+                                                                                 "type":  "main",
+                                                                                 "index":  0
+                                                                             }
+                                                                         ]
+                                                                     ]
+                                                        }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate"
+                 },
+    "versionId":  "c3d015ba-8938-4749-b8e5-d0d727425fc4",
+    "meta":  {
+                 "templateCredsSetupCompleted":  true,
+                 "instanceId":  "28774817f9310a0a58efc2824d4ea4f15df66d7ed0500bd3df4f509401156af9"
+             },
+    "nodeGroups":  [
+
+                   ],
+    "id":  "gVxY61cFk6vs6ieA",
+    "tags":  [
+
+             ]
+}

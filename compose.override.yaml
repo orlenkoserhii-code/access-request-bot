@@ -1,0 +1,36 @@
+services:
+  n8n-bootstrap:
+    environment:
+      N8N_PROXY_HOPS: "1"
+
+  n8n:
+    environment:
+      N8N_PROXY_HOPS: "1"
+
+  webhook-proxy:
+    image: nginx:1.30.5-alpine
+    profiles: ["slack"]
+    restart: unless-stopped
+    volumes:
+      - ./infra/webhook-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      n8n:
+        condition: service_started
+        restart: true
+
+  ngrok:
+    image: ${NGROK_IMAGE:-ngrok/ngrok@sha256:14d80d083e5b53145f416bbbd36238336c9de4016c43fd950eb2eb845670583b}
+    profiles: ["slack"]
+    restart: unless-stopped
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    command:
+      - http
+      - --url=${NGROK_URL:-http://localhost:5680}
+      - --inspect=false
+      - --log=stdout
+      - http://webhook-proxy:80
+    depends_on:
+      webhook-proxy:
+        condition: service_started
+        restart: true

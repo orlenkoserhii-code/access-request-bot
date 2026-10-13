@@ -1,0 +1,212 @@
+{
+    "name":  "Access Request Report",
+    "nodes":  [
+                  {
+                      "parameters":  {
+
+                                     },
+                      "type":  "n8n-nodes-base.manualTrigger",
+                      "typeVersion":  1,
+                      "position":  [
+                                       -432,
+                                       80
+                                   ],
+                      "id":  "615e1c0c-2f61-4d30-aca4-2c208fc9b7de",
+                      "name":  "When clicking вЂExecute workflowвЂ™"
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "WITH message_stats AS (\n  SELECT\n    COUNT(*)::integer AS total_messages,\n\n    COUNT(*) FILTER (\n      WHERE status = \u0027pending\u0027\n    )::integer AS pending_messages,\n\n    COUNT(*) FILTER (\n      WHERE status = \u0027processing\u0027\n    )::integer AS processing_messages,\n\n    COUNT(*) FILTER (\n      WHERE status = \u0027processed\u0027\n    )::integer AS processed_messages,\n\n    COUNT(*) FILTER (\n      WHERE status = \u0027failed\u0027\n    )::integer AS failed_messages,\n\n    COUNT(*) FILTER (\n      WHERE status = \u0027processed\u0027\n        AND message_type = \u0027non_request\u0027\n        AND result-\u003e\u003e\u0027message_route\u0027 = \u0027ignore\u0027\n    )::integer AS non_request_messages,\n\n    COUNT(*) FILTER (\n      WHERE status = \u0027failed\u0027\n        OR (\n          status = \u0027processed\u0027\n          AND (\n            result-\u003e\u003e\u0027message_route\u0027 = \u0027manual_review\u0027\n            OR EXISTS (\n              SELECT 1\n              FROM access.requests r\n              WHERE r.message_id = m.id\n                AND r.route = \u0027manual_review\u0027\n            )\n          )\n        )\n    )::integer AS manual_review_messages\n\n  FROM access.messages m\n),\n\nrequest_stats AS (\n  SELECT\n    COUNT(*)::integer AS total_requests,\n\n    COUNT(*) FILTER (\n      WHERE complete = TRUE\n    )::integer AS complete_requests,\n\n    COUNT(*) FILTER (\n      WHERE complete = FALSE\n    )::integer AS incomplete_requests,\n\n    COUNT(*) FILTER (\n      WHERE route = \u0027manual_review\u0027\n    )::integer AS risky_requests\n\n  FROM access.requests\n)\n\nSELECT m.*, r.*\nFROM message_stats m\nCROSS JOIN request_stats r;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       48,
+                                       0
+                                   ],
+                      "id":  "419c3b7a-797a-48ad-9d58-c754ab3e9487",
+                      "name":  "Execute a SQL query",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "pJ0OOYacZadGfP1X",
+                                                           "name":  "Access Request App DB"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "WITH thread_messages AS (\n  SELECT *\n  FROM access.messages\n  WHERE workspace_id = \u0027demo\u0027\n    AND channel_id = \u0027demo\u0027\n    AND author_id = \u0027demo-user\u0027\n    AND thread_ts = (SELECT thread_ts FROM access.messages WHERE source = \u0027demo\u0027 ORDER BY id DESC LIMIT 1)\n),\n\nthread_requests AS (\n  SELECT r.*\n  FROM access.requests r\n  JOIN thread_messages m\n    ON m.id = r.message_id\n)\n\nSELECT\n  (\n    SELECT COUNT(*)::integer\n    FROM thread_messages\n  ) AS total_messages,\n\n  (\n    SELECT COUNT(*)::integer\n    FROM thread_messages\n    WHERE status = \u0027processed\u0027\n  ) AS processed_messages,\n\n  COALESCE(\n    (\n      SELECT jsonb_agg(\n        jsonb_build_object(\n          \u0027message_id\u0027, m.id,\n          \u0027text\u0027, m.sanitized_text,\n          \u0027result\u0027, m.result,\n          \u0027status\u0027, m.status,\n          \u0027message_type\u0027, m.message_type,\n          \u0027message_route\u0027, m.result-\u003e\u003e\u0027message_route\u0027,\n          \u0027error_code\u0027, m.error_code\n        )\n        ORDER BY m.id\n      )\n      FROM thread_messages m\n    ),\n    \u0027[]\u0027::jsonb\n  ) AS messages,\n\n  (\n    SELECT COUNT(*)::integer\n    FROM thread_requests\n  ) AS total_requests,\n\n  COALESCE(\n    (\n      SELECT jsonb_agg(\n        to_jsonb(r)\n        ORDER BY r.created_at, r.id\n      )\n      FROM thread_requests r\n    ),\n    \u0027[]\u0027::jsonb\n  ) AS requests;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       272,
+                                       0
+                                   ],
+                      "id":  "74c4ff2e-b3f4-423c-9645-f10702615d1f",
+                      "name":  "Check Thread",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "pJ0OOYacZadGfP1X",
+                                                           "name":  "Access Request App DB"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "SELECT\n  m.id AS message_id,\n  m.author_id,\n  m.thread_ts,\n  m.status,\n  m.error_code,\n  m.result,\n\n  COALESCE(\n    (\n      SELECT jsonb_agg(\n        to_jsonb(r)\n        ORDER BY r.request_index\n      )\n      FROM access.requests r\n      WHERE r.message_id = m.id\n    ),\n    \u0027[]\u0027::jsonb\n  ) AS requests\n\nFROM access.messages m\nWHERE m.source = \u0027slack\u0027\n  AND m.workspace_id = \u0027__SLACK_WORKSPACE_ID__\u0027\n  AND m.channel_id = \u0027__SLACK_REQUESTS_CHANNEL_ID__\u0027\nORDER BY m.id DESC\nLIMIT 5;",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       496,
+                                       0
+                                   ],
+                      "id":  "53381afb-d1cc-4f20-94b9-9bc53f3d97ee",
+                      "name":  "Check Slack",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "pJ0OOYacZadGfP1X",
+                                                           "name":  "Access Request App DB"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "SELECT\n  n.id AS notification_id,\n  n.message_id,\n  n.kind,\n  n.status,\n  n.attempts,\n  n.payload-\u003e\u003e\u0027clarification_question\u0027\n    AS clarification_question,\n  n.created_at\nFROM access.notification_outbox n\nORDER BY n.created_at DESC, n.id\nLIMIT 10;",
+                                         "options":  {
+                                                         "queryBatching":  "single"
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       -128,
+                                       352
+                                   ],
+                      "id":  "defde019-d156-45ea-b3db-831dc049f970",
+                      "name":  "Check Notification Outbox",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "pJ0OOYacZadGfP1X",
+                                                           "name":  "Access Request App DB"
+                                                       }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "executeQuery",
+                                         "query":  "SELECT\n  COUNT(*)::integer AS total_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027pending\u0027\n  )::integer AS pending_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027processing\u0027\n  )::integer AS processing_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027sent\u0027\n  )::integer AS sent_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027failed\u0027\n  )::integer AS failed_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027cancelled\u0027\n  )::integer AS cancelled_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027processing\u0027\n      AND leased_until \u003c= NOW()\n  )::integer AS expired_notification_leases,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027sent\u0027\n      AND kind = \u0027clarification\u0027\n  )::integer AS sent_clarifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027sent\u0027\n      AND kind = \u0027standard_approval\u0027\n  )::integer AS sent_approval_notifications,\n\n  COUNT(*) FILTER (\n    WHERE status = \u0027sent\u0027\n      AND kind = \u0027manual_review\u0027\n  )::integer AS sent_manual_review_notifications\n\nFROM access.notification_outbox;",
+                                         "options":  {
+                                                         "queryBatching":  "single"
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.postgres",
+                      "typeVersion":  2.7,
+                      "position":  [
+                                       528,
+                                       368
+                                   ],
+                      "id":  "59815257-7cce-45d4-86af-2f99f85b21eb",
+                      "name":  "Notification Delivery Summary",
+                      "credentials":  {
+                                          "postgres":  {
+                                                           "id":  "pJ0OOYacZadGfP1X",
+                                                           "name":  "Access Request App DB"
+                                                       }
+                                      }
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "When clicking вЂExecute workflowвЂ™":  {
+                                                                     "main":  [
+                                                                                  [
+                                                                                      {
+                                                                                          "node":  "Execute a SQL query",
+                                                                                          "type":  "main",
+                                                                                          "index":  0
+                                                                                      },
+                                                                                      {
+                                                                                          "node":  "Check Notification Outbox",
+                                                                                          "type":  "main",
+                                                                                          "index":  0
+                                                                                      },
+                                                                                      {
+                                                                                          "node":  "Notification Delivery Summary",
+                                                                                          "type":  "main",
+                                                                                          "index":  0
+                                                                                      }
+                                                                                  ]
+                                                                              ]
+                                                                 },
+                        "Execute a SQL query":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Check Thread",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "Check Thread":  {
+                                             "main":  [
+                                                          [
+                                                              {
+                                                                  "node":  "Check Slack",
+                                                                  "type":  "main",
+                                                                  "index":  0
+                                                              }
+                                                          ]
+                                                      ]
+                                         },
+                        "Check Slack":  {
+                                            "main":  [
+                                                         [
+
+                                                         ]
+                                                     ]
+                                        }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate",
+                     "timeSavedMode":  "fixed",
+                     "saveDataErrorExecution":  "none",
+                     "saveDataSuccessExecution":  "none",
+                     "saveExecutionProgress":  false,
+                     "saveManualExecutions":  false,
+                     "callerPolicy":  "workflowsFromSameOwner",
+                     "availableInMCP":  false
+                 },
+    "versionId":  "f08a45ad-f2a6-4d7c-be01-a5195e61e4ad",
+    "meta":  {
+                 "templateCredsSetupCompleted":  true,
+                 "instanceId":  "28774817f9310a0a58efc2824d4ea4f15df66d7ed0500bd3df4f509401156af9"
+             },
+    "nodeGroups":  [
+
+                   ],
+    "id":  "cELG6vUR5BFfpsU1",
+    "tags":  [
+
+             ]
+}

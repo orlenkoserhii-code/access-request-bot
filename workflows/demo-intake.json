@@ -1,0 +1,137 @@
+{
+  "name": "Access Request Intake",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        16
+      ],
+      "id": "2e3e04a6-e795-4f00-b565-dd7a5f4265d2",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "9023a710-1e70-4873-ac24-26c711a7683b",
+              "name": "text",
+              "value": "Staging, viewer access for 48 hours to check dashboards.",
+              "type": "string"
+            },
+            {
+              "id": "08a614b4-2383-495f-95ba-1b6a6ea3907b",
+              "name": "thread_ts",
+              "value": "demo-thread-001",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        48,
+        16
+      ],
+      "id": "76b6c894-0c68-42c6-a004-25d2e400ea96",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "const originalText = $input.first().json.text;\nconst flags = new Set();\nlet text = originalText;\n\nconst secretPatterns = [\n  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\\s\\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$)/g,\n  /\\bxox[baprs]-[A-Za-z0-9-]{12,}/g,\n  /\\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}/g,\n  /\\bAKIA[A-Z0-9]{16}\\b/g,\n  /\\b(?:password|passwd|api[_-]?key|token|secret)\\s*[:=]\\s*(?:\"[^\"]*\"|'[^']*'|[^\\s,;]+)/gi\n];\n\nfor (const pattern of secretPatterns) {\n  text = text.replace(pattern, () => {\n    flags.add(\"sensitive_data_detected\");\n    return \"[REDACTED_SECRET]\";\n  });\n}\n\nif (/\\b(?:production|prod)\\b/i.test(text)) {\n  flags.add(\"production_mentioned\");\n}\n\nif (/\\b(?:admin|root|owner|superuser|sudo)\\b/i.test(text)) {\n  flags.add(\"privileged_permissions_mentioned\");\n}\n\nif (\n  /ignore.{0,40}(?:instructions|rules)|system\\s*prompt|approved\\s*[:=]|route\\s*[:=]/i.test(text)\n) {\n  flags.add(\"instruction_attempt\");\n}\n\nreturn [{\n  json: {\n    text,\n    security_flags: [...flags],\n    event_id: `demo-${$execution.id}`,\n    source: \"demo\",\n    workspace_id: \"demo\",\n    channel_id: \"demo\",\n    author_id: \"demo-user\",\n    message_ts: String($execution.id),\n    thread_ts: $input.first().json.thread_ts?.trim() || String($execution.id)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        16
+      ],
+      "id": "8effdd77-c71c-44e7-9c7d-43faa004ff3b",
+      "name": "Prepare Message"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH input AS (\n  SELECT $1::jsonb AS event\n)\nINSERT INTO access.messages (\n  event_id,\n  source,\n  workspace_id,\n  channel_id,\n  author_id,\n  message_ts,\n  thread_ts,\n  sanitized_text,\n  security_flags,\n  status\n)\nSELECT\n  event->>'event_id',\n  event->>'source',\n  event->>'workspace_id',\n  event->>'channel_id',\n  event->>'author_id',\n  event->>'message_ts',\n  event->>'thread_ts',\n  event->>'text',\n  event->'security_flags',\n  'pending'\nFROM input\nON CONFLICT (event_id) DO NOTHING\nRETURNING\n  id AS message_id,\n  event_id,\n  status;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        496,
+        16
+      ],
+      "id": "0d768cae-2036-415c-814a-6c01322b1468",
+      "name": "Enqueue Message",
+      "credentials": {
+        "postgres": {
+          "id": "pJ0OOYacZadGfP1X",
+          "name": "Access Request App DB"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Prepare Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Message": {
+      "main": [
+        [
+          {
+            "node": "Enqueue Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": false,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "0414a5a2-e77e-4119-a472-b32b49ad84fb",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "28774817f9310a0a58efc2824d4ea4f15df66d7ed0500bd3df4f509401156af9"
+  },
+  "nodeGroups": [],
+  "id": "2aK0JzgprhwqlINb",
+  "tags": []
+}
